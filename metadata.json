@@ -1,0 +1,6 @@
+{
+  "name": "CIZ Market",
+  "description": "Multi-category e-commerce marketplace with multi-role portals, mobile money payment abstraction, delivery logistics, and vendor management.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

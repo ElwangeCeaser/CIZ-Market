@@ -1,0 +1,794 @@
+// ==============================================================================
+// CIZ MARKET UGANDA - PRODUCTION RELATIONAL DATABASE SCHEMA (PRISMA ORM)
+// Database: PostgreSQL 16
+// Architecture: Multi-Vendor Marketplace, Escrow Ledgers, MTN/Airtel Webhook Idempotency
+// ==============================================================================
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// -----------------------------------------------------------------------------
+// ENUMS & TAXONOMIES
+// -----------------------------------------------------------------------------
+
+enum UserRole {
+  CUSTOMER
+  VENDOR
+  DELIVERY_AGENT
+  ADMIN
+  SUPER_ADMIN
+}
+
+enum AccountStatus {
+  PENDING_VERIFICATION
+  ACTIVE
+  SUSPENDED
+  DEACTIVATED
+}
+
+enum VendorVerificationStatus {
+  UNSUBMITTED
+  PENDING_REVIEW
+  VERIFIED
+  REJECTED
+  SUSPENDED
+}
+
+enum ProductStatus {
+  DRAFT
+  PENDING_APPROVAL
+  PUBLISHED
+  OUT_OF_STOCK
+  ARCHIVED
+}
+
+enum OrderStatus {
+  PENDING_PAYMENT
+  PAID
+  PROCESSING
+  READY_FOR_PICKUP
+  SHIPPED
+  OUT_FOR_DELIVERY
+  DELIVERED
+  CANCELLED
+  RETURN_REQUESTED
+  RETURNED
+  DISPUTED
+}
+
+enum PaymentMethod {
+  MTN_MOMO
+  AIRTEL_MONEY
+  VISA_MASTERCARD
+  CASH_ON_DELIVERY
+  BANK_TRANSFER
+}
+
+enum PaymentStatus {
+  INITIATED
+  PENDING_USSD
+  SUCCESSFUL
+  FAILED
+  REVERSED
+  REFUNDED
+}
+
+enum DeliveryStatus {
+  UNASSIGNED
+  ASSIGNED
+  EN_ROUTE_PICKUP
+  PICKED_UP
+  IN_TRANSIT_HUB
+  OUT_FOR_DELIVERY
+  DELIVERED
+  FAILED_ATTEMPT
+  RETURNED_TO_MERCHANT
+}
+
+enum RefundStatus {
+  REQUESTED
+  UNDER_REVIEW
+  APPROVED
+  PROCESSING
+  COMPLETED
+  REJECTED
+}
+
+enum DiscountType {
+  PERCENTAGE
+  FIXED_AMOUNT
+  FREE_SHIPPING
+}
+
+enum TicketPriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum TicketStatus {
+  OPEN
+  IN_PROGRESS
+  AWAITING_CUSTOMER
+  RESOLVED
+  CLOSED
+}
+
+// -----------------------------------------------------------------------------
+// 1. IDENTITY, USERS & ACCESS CONTROL (RBAC)
+// -----------------------------------------------------------------------------
+
+model User {
+  id              String         @id @default(uuid()) @db.Uuid
+  email           String         @unique @db.VarChar(255)
+  phoneNumber     String         @unique @db.VarChar(32) // International format: +256700000000
+  passwordHash    String         @db.VarChar(255)
+  fullName        String         @db.VarChar(150)
+  avatarUrl       String?        @db.VarChar(512)
+  role            UserRole       @default(CUSTOMER)
+  status          AccountStatus  @default(ACTIVE)
+  emailVerifiedAt DateTime?      @db.Timestamptz
+  phoneVerifiedAt DateTime?      @db.Timestamptz
+  lastLoginAt     DateTime?      @db.Timestamptz
+  createdAt       DateTime       @default(now()) @db.Timestamptz
+  updatedAt       DateTime       @updatedAt @db.Timestamptz
+
+  // Relationships
+  vendorProfile       VendorProfile?
+  deliveryProfile     DeliveryAgentProfile?
+  addresses           Address[]
+  cart                Cart?
+  wishlists           Wishlist[]
+  customerOrders      Order[]              @relation("CustomerOrders")
+  reviews             Review[]
+  supportTickets      SupportTicket[]      @relation("CustomerTickets")
+  assignedTickets     SupportTicket[]      @relation("AssignedAdminTickets")
+  notifications       Notification[]
+  auditLogs           AuditLog[]
+
+  @@index([role, status])
+  @@index([phoneNumber])
+  @@map("users")
+}
+
+// -----------------------------------------------------------------------------
+// 2. VENDOR ECOSYSTEM & COMPLIANCE (KYC / URA TIN)
+// -----------------------------------------------------------------------------
+
+model VendorProfile {
+  id                  String                   @id @default(uuid()) @db.Uuid
+  userId              String                   @unique @db.Uuid
+  businessName        String                   @db.VarChar(200)
+  slug                String                   @unique @db.VarChar(220)
+  tinNumber           String                   @unique @db.VarChar(50) // Uganda Revenue Authority (URA) TIN
+  businessRegistrationNo String?              @db.VarChar(100)
+  description         String?                  @db.Text
+  logoUrl             String?                  @db.VarChar(512)
+  bannerUrl           String?                  @db.VarChar(512)
+  physicalAddress     String                   @db.VarChar(300)
+  cityOrDistrict      String                   @db.VarChar(100)
+  supportPhone        String                   @db.VarChar(32)
+  supportEmail        String                   @db.VarChar(255)
+  payoutPhone         String                   @db.VarChar(32) // MTN or Airtel Registered Number
+  payoutNetwork       String                   @db.VarChar(20) // MTN or AIRTEL
+  payoutAccountName   String                   @db.VarChar(150)
+  commissionRatePct   Decimal                  @default(8.00) @db.Decimal(5, 2) // Marketplace take rate
+  verificationStatus  VendorVerificationStatus @default(PENDING_REVIEW)
+  rejectionReason     String?                  @db.Text
+  verifiedAt          DateTime?                @db.Timestamptz
+  createdAt           DateTime                 @default(now()) @db.Timestamptz
+  updatedAt           DateTime                 @updatedAt @db.Timestamptz
+
+  // Relationships
+  user                User                     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  verificationDocs    VendorVerificationDoc[]
+  products            Product[]
+  orderItems          OrderItem[]
+  escrowDisbursements VendorPayout[]
+
+  @@index([verificationStatus])
+  @@index([cityOrDistrict])
+  @@map("vendor_profiles")
+}
+
+model VendorVerificationDoc {
+  id              String        @id @default(uuid()) @db.Uuid
+  vendorProfileId String        @db.Uuid
+  documentType    String        @db.VarChar(50) // NATIONAL_ID, TIN_CERTIFICATE, TRADING_LICENSE
+  documentUrl     String        @db.VarChar(512)
+  documentNumber  String?       @db.VarChar(100)
+  isVerified      Boolean       @default(false)
+  verifiedAt      DateTime?     @db.Timestamptz
+  createdAt       DateTime      @default(now()) @db.Timestamptz
+
+  vendor          VendorProfile @relation(fields: [vendorProfileId], references: [id], onDelete: Cascade)
+
+  @@index([vendorProfileId, documentType])
+  @@map("vendor_verification_docs")
+}
+
+// -----------------------------------------------------------------------------
+// 3. PRODUCT TAXONOMY & CATALOG
+// -----------------------------------------------------------------------------
+
+model Category {
+  id          String         @id @default(uuid()) @db.Uuid
+  name        String         @unique @db.VarChar(100)
+  slug        String         @unique @db.VarChar(120)
+  description String?        @db.Text
+  iconName    String?        @db.VarChar(50)
+  imageUrl    String?        @db.VarChar(512)
+  displayOrder Int           @default(0)
+  isActive    Boolean        @default(true)
+  createdAt   DateTime       @default(now()) @db.Timestamptz
+  updatedAt   DateTime       @updatedAt @db.Timestamptz
+
+  subcategories Subcategory[]
+  products      Product[]
+
+  @@index([isActive, displayOrder])
+  @@map("categories")
+}
+
+model Subcategory {
+  id          String        @id @default(uuid()) @db.Uuid
+  categoryId  String        @db.Uuid
+  name        String        @db.VarChar(100)
+  slug        String        @unique @db.VarChar(120)
+  description String?       @db.Text
+  imageUrl    String?       @db.VarChar(512)
+  isActive    Boolean       @default(true)
+  createdAt   DateTime      @default(now()) @db.Timestamptz
+  updatedAt   DateTime      @updatedAt @db.Timestamptz
+
+  category    Category      @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  products    Product[]
+
+  @@unique([categoryId, name])
+  @@index([categoryId, isActive])
+  @@map("subcategories")
+}
+
+model Product {
+  id               String         @id @default(uuid()) @db.Uuid
+  vendorProfileId  String         @db.Uuid
+  categoryId       String         @db.Uuid
+  subcategoryId    String?        @db.Uuid
+  title            String         @db.VarChar(255)
+  slug             String         @unique @db.VarChar(280)
+  sku              String         @unique @db.VarChar(64)
+  brand            String         @default("Generic") @db.VarChar(100)
+  shortDescription String?        @db.VarChar(500)
+  description      String         @db.Text
+  basePrice        Decimal        @db.Decimal(12, 2) // Current listed price in UGX
+  discountPrice    Decimal?       @db.Decimal(12, 2) // Discounted listed price in UGX
+  stockQuantity    Int            @default(0)
+  lowStockThreshold Int           @default(5)
+  weightKg         Decimal?       @db.Decimal(6, 2)
+  warrantyInfo     String?        @db.VarChar(200)
+  specifications   Json           @default("{}") // Key-value technical specs
+  status           ProductStatus  @default(PUBLISHED)
+  isFeatured       Boolean        @default(false)
+  isFlashDeal      Boolean        @default(false)
+  viewsCount       Int            @default(0)
+  salesCount       Int            @default(0)
+  averageRating    Decimal        @default(0.00) @db.Decimal(3, 2)
+  reviewsCount     Int            @default(0)
+  createdAt        DateTime       @default(now()) @db.Timestamptz
+  updatedAt        DateTime       @updatedAt @db.Timestamptz
+
+  // Relationships
+  vendor           VendorProfile  @relation(fields: [vendorProfileId], references: [id], onDelete: Restrict)
+  category         Category       @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  subcategory      Subcategory?   @relation(fields: [subcategoryId], references: [id], onDelete: SetNull)
+  images           ProductImage[]
+  variants         ProductVariant[]
+  cartItems        CartItem[]
+  wishlistItems    WishlistItem[]
+  orderItems       OrderItem[]
+  reviews          Review[]
+
+  @@index([vendorProfileId, status])
+  @@index([categoryId, status])
+  @@index([subcategoryId, status])
+  @@index([brand])
+  @@index([basePrice])
+  @@index([isFlashDeal, isFeatured])
+  @@map("products")
+}
+
+model ProductImage {
+  id           String   @id @default(uuid()) @db.Uuid
+  productId    String   @db.Uuid
+  imageUrl     String   @db.VarChar(512)
+  altText      String?  @db.VarChar(200)
+  isThumbnail  Boolean  @default(false)
+  displayOrder Int      @default(0)
+  createdAt    DateTime @default(now()) @db.Timestamptz
+
+  product      Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([productId, displayOrder])
+  @@map("product_images")
+}
+
+model ProductVariant {
+  id              String      @id @default(uuid()) @db.Uuid
+  productId       String      @db.Uuid
+  sku             String      @unique @db.VarChar(64)
+  variantName     String      @db.VarChar(100) // e.g. "Space Gray / 256GB"
+  colorHex        String?     @db.VarChar(10)  // e.g. "#2D3748"
+  sizeOrSpec      String?     @db.VarChar(50)  // e.g. "XL" or "256GB"
+  additionalPrice Decimal     @default(0.00) @db.Decimal(12, 2) // Extra cost in UGX
+  stockQuantity   Int         @default(0)
+  imageUrl        String?     @db.VarChar(512)
+  isActive        Boolean     @default(true)
+  createdAt       DateTime    @default(now()) @db.Timestamptz
+  updatedAt       DateTime    @updatedAt @db.Timestamptz
+
+  product         Product     @relation(fields: [productId], references: [id], onDelete: Cascade)
+  cartItems       CartItem[]
+  orderItems      OrderItem[]
+
+  @@index([productId, isActive])
+  @@map("product_variants")
+}
+
+// -----------------------------------------------------------------------------
+// 4. SHOPPING CARTS & WISHLISTS
+// -----------------------------------------------------------------------------
+
+model Cart {
+  id        String     @id @default(uuid()) @db.Uuid
+  userId    String     @unique @db.Uuid
+  createdAt DateTime   @default(now()) @db.Timestamptz
+  updatedAt DateTime   @updatedAt @db.Timestamptz
+
+  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  items     CartItem[]
+
+  @@map("carts")
+}
+
+model CartItem {
+  id               String          @id @default(uuid()) @db.Uuid
+  cartId           String          @db.Uuid
+  productId        String          @db.Uuid
+  productVariantId String?         @db.Uuid
+  quantity         Int             @default(1)
+  createdAt        DateTime        @default(now()) @db.Timestamptz
+  updatedAt        DateTime        @updatedAt @db.Timestamptz
+
+  cart             Cart            @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  product          Product         @relation(fields: [productId], references: [id], onDelete: Cascade)
+  variant          ProductVariant? @relation(fields: [productVariantId], references: [id], onDelete: SetNull)
+
+  @@unique([cartId, productId, productVariantId])
+  @@index([cartId])
+  @@map("cart_items")
+}
+
+model Wishlist {
+  id        String         @id @default(uuid()) @db.Uuid
+  userId    String         @db.Uuid
+  name      String         @default("My Wishlist") @db.VarChar(100)
+  createdAt DateTime       @default(now()) @db.Timestamptz
+  updatedAt DateTime       @updatedAt @db.Timestamptz
+
+  user      User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  items     WishlistItem[]
+
+  @@index([userId])
+  @@map("wishlists")
+}
+
+model WishlistItem {
+  id         String   @id @default(uuid()) @db.Uuid
+  wishlistId String   @db.Uuid
+  productId  String   @db.Uuid
+  createdAt  DateTime @default(now()) @db.Timestamptz
+
+  wishlist   Wishlist @relation(fields: [wishlistId], references: [id], onDelete: Cascade)
+  product    Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([wishlistId, productId])
+  @@map("wishlist_items")
+}
+
+// -----------------------------------------------------------------------------
+// 5. REGIONAL DELIVERY ZONES & CUSTOMER ADDRESSES
+// -----------------------------------------------------------------------------
+
+model DeliveryZone {
+  id                 String    @id @default(uuid()) @db.Uuid
+  zoneCode           String    @unique @db.VarChar(50) // e.g. KLA_CBD, WAK_ENTEBBE, UPC_MBARARA
+  name               String    @db.VarChar(120)
+  region             String    @db.VarChar(80) // Central, Western, Eastern, Northern
+  estimatedDelivery  String    @db.VarChar(80) // e.g. "2-4 hours", "24-48 hours"
+  baseDeliveryFee    Decimal   @db.Decimal(10, 2) // Base fee in UGX
+  perKgAdditionalFee Decimal   @default(0.00) @db.Decimal(10, 2)
+  isActive           Boolean   @default(true)
+  createdAt          DateTime  @default(now()) @db.Timestamptz
+  updatedAt          DateTime  @updatedAt @db.Timestamptz
+
+  addresses          Address[]
+
+  @@index([zoneCode, isActive])
+  @@map("delivery_zones")
+}
+
+model Address {
+  id            String        @id @default(uuid()) @db.Uuid
+  userId        String        @db.Uuid
+  zoneId        String        @db.Uuid
+  recipientName String        @db.VarChar(150)
+  phoneNumber   String        @db.VarChar(32)
+  district      String        @db.VarChar(100) // e.g. Kampala, Wakiso, Mukono
+  cityTown      String        @db.VarChar(100)
+  streetAddress String        @db.VarChar(255) // e.g. Plot 14, Old Kira Road
+  landmark      String        @db.VarChar(255) // Critical for dispatch Boda: "Near TotalEnergies station"
+  latitude      Decimal?      @db.Decimal(10, 7)
+  longitude     Decimal?      @db.Decimal(10, 7)
+  isDefault     Boolean       @default(false)
+  createdAt     DateTime      @default(now()) @db.Timestamptz
+  updatedAt     DateTime      @updatedAt @db.Timestamptz
+
+  user          User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  zone          DeliveryZone  @relation(fields: [zoneId], references: [id], onDelete: Restrict)
+  orders        Order[]
+
+  @@index([userId, isDefault])
+  @@map("addresses")
+}
+
+// -----------------------------------------------------------------------------
+// 6. ORDERS, FROZEN TRANSACTION SNAPSHOTS & DISCOUNTS
+// -----------------------------------------------------------------------------
+
+model Coupon {
+  id               String       @id @default(uuid()) @db.Uuid
+  code             String       @unique @db.VarChar(32) // e.g. "WELCOME10", "MOMOFEST"
+  description      String?      @db.VarChar(255)
+  discountType     DiscountType @default(PERCENTAGE)
+  discountValue    Decimal      @db.Decimal(10, 2) // e.g. 10.00 for 10% or 15000 for 15k UGX
+  minPurchaseUGX   Decimal      @default(0.00) @db.Decimal(12, 2)
+  maxDiscountUGX   Decimal?     @db.Decimal(12, 2)
+  usageLimit       Int?
+  usageCount       Int          @default(0)
+  validFrom        DateTime     @db.Timestamptz
+  validUntil       DateTime     @db.Timestamptz
+  isActive         Boolean      @default(true)
+  createdAt        DateTime     @default(now()) @db.Timestamptz
+
+  orders           Order[]
+
+  @@index([code, isActive])
+  @@map("coupons")
+}
+
+model Order {
+  id                   String        @id @default(uuid()) @db.Uuid
+  orderNumber          String        @unique @db.VarChar(32) // e.g. "CIZ-2026-89421"
+  trackingNumber       String        @unique @db.VarChar(40) // e.g. "TRK-UG-94812"
+  customerId           String        @db.Uuid
+  deliveryAddressId    String        @db.Uuid
+  couponId             String?       @db.Uuid
+
+  // Frozen Financial Snapshot (Preserved forever regardless of future catalog changes)
+  subtotalAmount       Decimal       @db.Decimal(12, 2) // Sum of frozen item totals in UGX
+  deliveryFee          Decimal       @db.Decimal(10, 2) // Delivery rate at purchase in UGX
+  discountAmount       Decimal       @default(0.00) @db.Decimal(10, 2)
+  totalAmount          Decimal       @db.Decimal(12, 2) // (Subtotal + DeliveryFee - Discount)
+
+  orderStatus          OrderStatus   @default(PENDING_PAYMENT)
+  paymentStatus        PaymentStatus @default(INITIATED)
+  paymentMethod        PaymentMethod @default(MTN_MOMO)
+
+  // Preserved Delivery Snapshot
+  recipientSnapshot    Json          // Name, Phone, Street, Landmark, District preserved
+  customerNotes        String?       @db.Text
+  cancellationReason   String?       @db.Text
+  cancelledAt          DateTime?     @db.Timestamptz
+  deliveredAt          DateTime?     @db.Timestamptz
+  createdAt            DateTime      @default(now()) @db.Timestamptz
+  updatedAt            DateTime      @updatedAt @db.Timestamptz
+
+  // Relationships
+  customer             User          @relation("CustomerOrders", fields: [customerId], references: [id], onDelete: Restrict)
+  deliveryAddress      Address       @relation(fields: [deliveryAddressId], references: [id], onDelete: Restrict)
+  coupon               Coupon?       @relation(fields: [couponId], references: [id], onDelete: SetNull)
+  items                OrderItem[]
+  payments             PaymentTransaction[]
+  deliveryAssignments  DeliveryAssignment[]
+  refundRequests       RefundRequest[]
+  statusHistory        OrderStatusHistory[]
+
+  @@index([customerId, orderStatus])
+  @@index([orderNumber])
+  @@index([trackingNumber])
+  @@index([orderStatus, paymentStatus])
+  @@index([createdAt])
+  @@map("orders")
+}
+
+model OrderItem {
+  id                 String          @id @default(uuid()) @db.Uuid
+  orderId            String          @db.Uuid
+  vendorProfileId    String          @db.Uuid
+  productId          String          @db.Uuid
+  productVariantId   String?         @db.Uuid
+
+  // Immutable Item Snapshot at moment of purchase
+  productTitle       String          @db.VarChar(255)
+  productSku         String          @db.VarChar(64)
+  variantName        String?         @db.VarChar(100)
+  unitPrice          Decimal         @db.Decimal(12, 2) // Price captured at checkout (UGX)
+  quantity           Int             @default(1)
+  totalPrice         Decimal         @db.Decimal(12, 2) // (unitPrice * quantity)
+  vendorCommissionPct Decimal        @db.Decimal(5, 2)  // Commission rate snapshot
+  vendorEarningAmount Decimal        @db.Decimal(12, 2) // Payout due to vendor after commission
+  isRefunded         Boolean         @default(false)
+  createdAt          DateTime        @default(now()) @db.Timestamptz
+
+  order              Order           @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  vendor             VendorProfile   @relation(fields: [vendorProfileId], references: [id], onDelete: Restrict)
+  product            Product         @relation(fields: [productId], references: [id], onDelete: Restrict)
+  variant            ProductVariant? @relation(fields: [productVariantId], references: [id], onDelete: SetNull)
+
+  @@index([orderId])
+  @@index([vendorProfileId])
+  @@index([productId])
+  @@map("order_items")
+}
+
+model OrderStatusHistory {
+  id          String      @id @default(uuid()) @db.Uuid
+  orderId     String      @db.Uuid
+  status      OrderStatus
+  note        String?     @db.VarChar(255)
+  changedBy   String?     @db.VarChar(100) // User ID or "SYSTEM" / "WEBHOOK"
+  createdAt   DateTime    @default(now()) @db.Timestamptz
+
+  order       Order       @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId, createdAt])
+  @@map("order_status_history")
+}
+
+// -----------------------------------------------------------------------------
+// 7. PAYMENT TRANSACTIONS, ESCROW LEDGER & WEBHOOK IDEMPOTENCY
+// -----------------------------------------------------------------------------
+
+model PaymentTransaction {
+  id                 String           @id @default(uuid()) @db.Uuid
+  orderId            String           @db.Uuid
+  transactionRef     String           @unique @db.VarChar(100) // Internal Ref e.g. "TXN-CIZ-2026-98124"
+  externalGatewayRef String?          @unique @db.VarChar(128) // MTN / Airtel / Bank Financial Transaction ID
+  provider           PaymentMethod
+  amount             Decimal          @db.Decimal(12, 2)
+  currency           String           @default("UGX") @db.VarChar(3)
+  payerPhoneNumber   String?          @db.VarChar(32) // Customer's 077/070 MoMo line
+  status             PaymentStatus    @default(INITIATED)
+  gatewayStatusCode  String?          @db.VarChar(50)
+  gatewayMessage     String?          @db.Text
+  rawGatewayResponse Json?            // Raw initiation response
+  initiatedAt        DateTime         @default(now()) @db.Timestamptz
+  completedAt        DateTime?        @db.Timestamptz
+
+  order              Order            @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  webhooks           PaymentWebhookLog[]
+
+  @@index([orderId])
+  @@index([transactionRef])
+  @@index([externalGatewayRef])
+  @@index([status])
+  @@map("payment_transactions")
+}
+
+model PaymentWebhookLog {
+  id                   String              @id @default(uuid()) @db.Uuid
+  paymentTransactionId String?             @db.Uuid
+  provider             PaymentMethod
+  webhookEventType     String              @db.VarChar(100)
+  idempotencyKey       String              @unique @db.VarChar(150) // Prevents processing duplicate callbacks
+  payload              Json                // Exact payload from MTN / Airtel
+  signatureHeader      String?             @db.VarChar(512) // HMAC signature for verification
+  isSignatureValid     Boolean             @default(false)
+  isProcessed          Boolean             @default(false)
+  processingError      String?             @db.Text
+  receivedAt           DateTime            @default(now()) @db.Timestamptz
+  processedAt          DateTime?           @db.Timestamptz
+
+  paymentTransaction   PaymentTransaction? @relation(fields: [paymentTransactionId], references: [id], onDelete: SetNull)
+
+  @@index([idempotencyKey])
+  @@index([provider, isProcessed])
+  @@map("payment_webhook_logs")
+}
+
+model VendorPayout {
+  id                 String        @id @default(uuid()) @db.Uuid
+  vendorProfileId    String        @db.Uuid
+  payoutReference    String        @unique @db.VarChar(100) // e.g. "PAYOUT-UG-8912"
+  grossSalesAmount   Decimal       @db.Decimal(12, 2)
+  commissionDeducted Decimal       @db.Decimal(12, 2)
+  netDisbursedAmount Decimal       @db.Decimal(12, 2)
+  payoutMethod       String        @default("MTN_MOMO_DISBURSEMENT") @db.VarChar(50)
+  recipientPhone     String        @db.VarChar(32)
+  disbursementRef    String?       @db.VarChar(128)
+  status             PaymentStatus @default(INITIATED)
+  scheduledDate      DateTime      @db.Date
+  disbursedAt        DateTime?     @db.Timestamptz
+  createdAt          DateTime      @default(now()) @db.Timestamptz
+
+  vendor             VendorProfile @relation(fields: [vendorProfileId], references: [id], onDelete: Restrict)
+
+  @@index([vendorProfileId, status])
+  @@index([payoutReference])
+  @@map("vendor_payouts")
+}
+
+// -----------------------------------------------------------------------------
+// 8. LOGISTICS, DISPATCH COURIERS & LIVE TRACKING
+// -----------------------------------------------------------------------------
+
+model DeliveryAgentProfile {
+  id               String               @id @default(uuid()) @db.Uuid
+  userId           String               @unique @db.Uuid
+  vehicleType      String               @default("Boda-Boda (Bajaj Boxer)") @db.VarChar(60)
+  vehiclePlateNo   String               @unique @db.VarChar(30) // e.g. "UFA 489X"
+  nationalIdNumber String               @unique @db.VarChar(50)
+  drivingPermitNo  String?              @db.VarChar(50)
+  assignedHub      String               @default("Kampala Central Hub") @db.VarChar(100)
+  currentLatitude  Decimal?             @db.Decimal(10, 7)
+  currentLongitude Decimal?             @db.Decimal(10, 7)
+  isAvailable      Boolean              @default(true)
+  createdAt        DateTime             @default(now()) @db.Timestamptz
+  updatedAt        DateTime             @updatedAt @db.Timestamptz
+
+  user             User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  assignments      DeliveryAssignment[]
+
+  @@index([isAvailable, assignedHub])
+  @@map("delivery_agent_profiles")
+}
+
+model DeliveryAssignment {
+  id                   String               @id @default(uuid()) @db.Uuid
+  orderId              String               @db.Uuid
+  deliveryAgentId      String               @db.Uuid
+  status               DeliveryStatus       @default(ASSIGNED)
+  pickupLandmark       String?              @db.VarChar(255)
+  dropoffLandmark      String               @db.VarChar(255) // Customer landmark snapshot
+  assignedAt           DateTime             @default(now()) @db.Timestamptz
+  pickedUpAt           DateTime?            @db.Timestamptz
+  deliveredAt          DateTime?            @db.Timestamptz
+  recipientSignatureUrl String?             @db.VarChar(512)
+  deliveryNotes        String?              @db.Text
+
+  order                Order                @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  deliveryAgent        DeliveryAgentProfile @relation(fields: [deliveryAgentId], references: [id], onDelete: Restrict)
+
+  @@index([orderId, status])
+  @@index([deliveryAgentId, status])
+  @@map("delivery_assignments")
+}
+
+// -----------------------------------------------------------------------------
+// 9. REVIEWS, REFUNDS, SUPPORT & SYSTEM AUDITING
+// -----------------------------------------------------------------------------
+
+model Review {
+  id         String   @id @default(uuid()) @db.Uuid
+  productId  String   @db.Uuid
+  userId     String   @db.Uuid
+  rating     Int      @default(5) // 1 to 5 stars
+  title      String?  @db.VarChar(120)
+  comment    String   @db.Text
+  isVerified Boolean  @default(true) // Verified Ugandan purchase
+  createdAt  DateTime @default(now()) @db.Timestamptz
+  updatedAt  DateTime @updatedAt @db.Timestamptz
+
+  product    Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([productId, userId]) // 1 review per product per customer
+  @@index([productId, rating])
+  @@map("reviews")
+}
+
+model RefundRequest {
+  id               String       @id @default(uuid()) @db.Uuid
+  orderId          String       @db.Uuid
+  refundNumber     String       @unique @db.VarChar(32) // e.g. "RFD-UG-48201"
+  reason           String       @db.VarChar(255)
+  details          String?      @db.Text
+  requestedAmount  Decimal      @db.Decimal(12, 2)
+  refundedAmount   Decimal?     @db.Decimal(12, 2)
+  payoutMethod     PaymentMethod @default(MTN_MOMO)
+  payoutPhone      String       @db.VarChar(32)
+  reversalRef      String?      @db.VarChar(128)
+  status           RefundStatus @default(REQUESTED)
+  reviewedByAdmin  String?      @db.VarChar(100)
+  createdAt        DateTime     @default(now()) @db.Timestamptz
+  resolvedAt       DateTime?    @db.Timestamptz
+
+  order            Order        @relation(fields: [orderId], references: [id], onDelete: Restrict)
+
+  @@index([orderId, status])
+  @@index([refundNumber])
+  @@map("refund_requests")
+}
+
+model SupportTicket {
+  id           String         @id @default(uuid()) @db.Uuid
+  ticketNumber String         @unique @db.VarChar(32) // e.g. "TCK-UG-1094"
+  userId       String         @db.Uuid
+  assignedToId String?        @db.Uuid
+  subject      String         @db.VarChar(200)
+  priority     TicketPriority @default(MEDIUM)
+  status       TicketStatus   @default(OPEN)
+  createdAt    DateTime       @default(now()) @db.Timestamptz
+  updatedAt    DateTime       @updatedAt @db.Timestamptz
+
+  user         User           @relation("CustomerTickets", fields: [userId], references: [id], onDelete: Cascade)
+  assignedTo   User?          @relation("AssignedAdminTickets", fields: [assignedToId], references: [id], onDelete: SetNull)
+  messages     TicketMessage[]
+
+  @@index([userId, status])
+  @@index([assignedToId, status])
+  @@map("support_tickets")
+}
+
+model TicketMessage {
+  id        String        @id @default(uuid()) @db.Uuid
+  ticketId  String        @db.Uuid
+  senderId  String        @db.Uuid
+  message   String        @db.Text
+  createdAt DateTime      @default(now()) @db.Timestamptz
+
+  ticket    SupportTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+
+  @@index([ticketId, createdAt])
+  @@map("ticket_messages")
+}
+
+model Notification {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @db.Uuid
+  title     String   @db.VarChar(150)
+  message   String   @db.Text
+  linkUrl   String?  @db.VarChar(255)
+  isRead    Boolean  @default(false)
+  createdAt DateTime @default(now()) @db.Timestamptz
+
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, isRead])
+  @@map("notifications")
+}
+
+model AuditLog {
+  id         String   @id @default(uuid()) @db.Uuid
+  userId     String?  @db.Uuid
+  action     String   @db.VarChar(100) // e.g. "VENDOR_APPROVED", "PRICE_OVERRIDE", "MOMO_WEBHOOK_RECEIVED"
+  entityType String   @db.VarChar(60)  // "ORDER", "PAYMENT", "PRODUCT", "VENDOR"
+  entityId   String   @db.VarChar(64)
+  ipAddress  String?  @db.VarChar(45)
+  userAgent  String?  @db.VarChar(255)
+  changes    Json?    // Pre & post state delta
+  createdAt  DateTime @default(now()) @db.Timestamptz
+
+  user       User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([entityType, entityId])
+  @@index([action, createdAt])
+  @@map("audit_logs")
+}
